@@ -262,6 +262,7 @@ static struct {
 	gint set_tab_name_accelerator;
 	gint search_accelerator;
 	gint set_colorset_accelerator;
+	gint new_window_accelerator;
 	gint add_tab_key;
 	gint del_tab_key;
 	gint prev_tab_key;
@@ -275,6 +276,7 @@ static struct {
 	gint increase_font_size_key;
 	gint decrease_font_size_key;
 	gint set_colorset_keys[NUM_COLORSETS];
+	gint new_window_key;
 	VteRegex *http_vteregexp, *mail_vteregexp;
 	char *argv[3];
 } sakura;
@@ -320,6 +322,7 @@ struct terminal {
 #define DEFAULT_SET_TAB_NAME_ACCELERATOR (GDK_CONTROL_MASK|GDK_SHIFT_MASK)
 #define DEFAULT_SEARCH_ACCELERATOR (GDK_CONTROL_MASK|GDK_SHIFT_MASK)
 #define DEFAULT_SELECT_COLORSET_ACCELERATOR (GDK_CONTROL_MASK|GDK_SHIFT_MASK)
+#define DEFAULT_NEW_WINDOW_ACCELERATOR (GDK_CONTROL_MASK|GDK_SHIFT_MASK)
 #define DEFAULT_ADD_TAB_KEY  GDK_KEY_T
 #define DEFAULT_DEL_TAB_KEY  GDK_KEY_W
 #define DEFAULT_PREV_TAB_KEY  GDK_KEY_Left
@@ -327,11 +330,12 @@ struct terminal {
 #define DEFAULT_COPY_KEY  GDK_KEY_C
 #define DEFAULT_PASTE_KEY  GDK_KEY_V
 #define DEFAULT_SCROLLBAR_KEY  GDK_KEY_S
-#define DEFAULT_SET_TAB_NAME_KEY  GDK_KEY_N
+#define DEFAULT_SET_TAB_NAME_KEY  GDK_KEY_R
 #define DEFAULT_SEARCH_KEY  GDK_KEY_F
 #define DEFAULT_FULLSCREEN_KEY  GDK_KEY_F11
 #define DEFAULT_INCREASE_FONT_SIZE_KEY GDK_KEY_plus
 #define DEFAULT_DECREASE_FONT_SIZE_KEY GDK_KEY_minus
+#define DEFAULT_NEW_WINDOW_KEY GDK_KEY_N
 #define DEFAULT_SCROLLABLE_TABS TRUE
 
 /* make this an array instead of #defines to get a compile time
@@ -434,6 +438,7 @@ static void     sakura_init ();
 static void     sakura_init_popup ();
 static void     sakura_destroy ();
 static void     sakura_add_tab ();
+static void     sakura_new_window ();
 static void     sakura_del_tab ();
 static void     sakura_move_tab (gint);
 static gint     sakura_find_tab (VteTerminal *);
@@ -519,6 +524,13 @@ sakura_key_press (GtkWidget *widget, GdkEventKey *event, gpointer user_data)
 			keycode==sakura_tokeycode(sakura.del_tab_key) ) {
 		/* Delete current tab */
 		sakura_close_tab(NULL, NULL);
+		return TRUE;
+	}
+	
+	/* New window */
+	if ( (event->state & sakura.new_window_accelerator) == sakura.new_window_accelerator &&
+			keycode == sakura_tokeycode(sakura.new_window_key)) {
+		sakura_new_window();
 		return TRUE;
 	}
 
@@ -2127,6 +2139,11 @@ sakura_init()
 		sakura_set_config_integer("search_accelerator", DEFAULT_SEARCH_ACCELERATOR);
 	}
 	sakura.search_accelerator = g_key_file_get_integer(sakura.cfg, cfg_group, "search_accelerator", NULL);
+	
+	if (!g_key_file_has_key(sakura.cfg, cfg_group, "new_window_accelerator", NULL)) {
+		sakura_set_config_integer("new_window_accelerator", DEFAULT_NEW_WINDOW_ACCELERATOR);
+	}
+	sakura.new_window_accelerator = g_key_file_get_integer(sakura.cfg, cfg_group, "new_window_accelerator", NULL);
 
 	if (!g_key_file_has_key(sakura.cfg, cfg_group, "add_tab_key", NULL)) {
 		sakura_set_keybind("add_tab_key", DEFAULT_ADD_TAB_KEY);
@@ -2187,6 +2204,11 @@ sakura_init()
 		sakura_set_keybind("fullscreen_key", DEFAULT_FULLSCREEN_KEY);
 	}
 	sakura.fullscreen_key = sakura_get_keybind("fullscreen_key");
+	
+	if (!g_key_file_has_key(sakura.cfg, cfg_group, "new_window_key", NULL)) {
+		sakura_set_keybind("new_window_key", DEFAULT_NEW_WINDOW_KEY);
+	}
+	sakura.new_window_key = sakura_get_keybind("new_window_key");
 
 	if (!g_key_file_has_key(sakura.cfg, cfg_group, "set_colorset_accelerator", NULL)) {
 		sakura_set_config_integer("set_colorset_accelerator", DEFAULT_SELECT_COLORSET_ACCELERATOR);
@@ -3194,6 +3216,53 @@ sakura_del_tab(gint page)
 }
 
 
+/* New window -- launch a new instance */
+/* Save original arguments to start a new instance if needed */
+static int orig_argc = 0;
+static char** orig_argv = NULL;
+
+static void
+sakura_new_window()
+{
+	GPid pid;
+	GError* error = NULL;
+	char** spawn_argv = malloc(sizeof(char*) * ((orig_argc ? orig_argc : 1) + 1));
+	if(!spawn_argv) {
+		fprintf(stderr, "Error allocating memory for starting new instance!\n");
+		return;
+	}
+	char cmdline[PATH_MAX + 1];
+	/* TODO: this is Linux-specific! */
+	ssize_t tmp = readlink("/proc/self/exe", cmdline, PATH_MAX);
+	cmdline[tmp] = 0;
+	spawn_argv[0] = cmdline;
+	/* remove command arguments so that the new window will be in interactive mode */
+	char** dst;
+	char** src;
+	if(orig_argc) for(dst = spawn_argv + 1, src = orig_argv + 1; *src; ++dst, ++src) {
+		if(!strcmp(*src, "-e") || !strcmp(*src, "--xterm-execute")) {
+			break;
+		}
+		if(!strcmp(*src, "-x") || !strcmp(*src, "--xterm")) {
+			++src;
+			if(!(*src)) {
+				break;
+			}
+		} else {
+			*dst = *src;
+		}
+	}
+	*dst = NULL;
+	if (!g_spawn_async(NULL, spawn_argv, NULL,
+			G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+			NULL, NULL, &pid, &error)) {
+		fprintf(stderr, "Error starting new instance:\n%s\n", error->message);
+		g_error_free(error);
+	}
+	g_spawn_close_pid(pid);
+	free(spawn_argv);
+}
+
 /* Save configuration */
 static void
 sakura_config_done()
@@ -3421,6 +3490,9 @@ main(int argc, char **argv)
 	nargv = (char**)calloc((argc+1), sizeof(char*));
 	n=0; nargc=argc;
 	have_e=FALSE;
+	
+	orig_argc = argc;
+	orig_argv = argv;
 
 	for(i=0; i<argc; i++) {
 		if(!have_e && g_strcmp0(argv[i],"-e") == 0)
